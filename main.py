@@ -121,12 +121,11 @@ async def shutdown_event():
 
 @app.get("/api/instances")
 async def get_instances():
-    return {
-        "tunnels": [
-            {"target": "Instances", "tunnel": tunnels_info.get(hf_url)}
-            for hf_url in HF_URLS
-        ]
-    }
+    return [
+        tunnels_info[hf_url]
+        for hf_url in HF_URLS
+        if tunnels_info.get(hf_url)
+    ]
 
 
 @app.get("/api/new")
