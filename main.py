@@ -123,7 +123,7 @@ async def shutdown_event():
 async def get_instances():
     return {
         "tunnels": [
-            {"target": hf_url, "tunnel": tunnels_info.get(hf_url)}
+            {"target": "Instances", "tunnel": tunnels_info.get(hf_url)}
             for hf_url in HF_URLS
         ]
     }
