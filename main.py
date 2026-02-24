@@ -20,10 +20,7 @@ app.add_middleware(
 
 
 HF_URLS = [
-    "https://cursorpro-streamion.hf.space",
-    "https://cursorpro-streamion-2.hf.space",
-    "https://shashwatidr-we.hf.space",
-    "https://veltrixcode-stream.hf.space"
+    "https://inv-veltrix-2.zeabur.app"
 ]
 
 LOCAL_START_PORT = 19000
