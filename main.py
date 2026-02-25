@@ -20,7 +20,8 @@ app.add_middleware(
 
 
 HF_URLS = [
-    "https://inv-veltrix-2.zeabur.app"
+    "https://inv-veltrix-2.zeabur.app",
+    "https://inv-veltrix-3.zeabur.app"
 ]
 
 LOCAL_START_PORT = 19000
