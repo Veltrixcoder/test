@@ -20,9 +20,7 @@ app.add_middleware(
 
 
 HF_URLS = [
-    "https://inv-veltrix-2.zeabur.app",
-    "https://inv-veltrix-3.zeabur.app",
-    "https://temp021-testcomp.hf.space"
+    "https://srffewarf-streamtest.hf.space"
 ]
 
 LOCAL_START_PORT = 19000
