@@ -1,159 +1,152 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import subprocess
-import threading
-import re
-import time
-import sys
-import os
-import socket
+import http.server
+import socketserver
+import uuid
+import json
+import http.client
+import urllib.request
 
-app = FastAPI()
+PORT = 7860
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# -------- Detect server region ONCE --------
+def get_country():
+    try:
+        return urllib.request.urlopen(
+            "https://ipinfo.io/country",
+            timeout=5
+        ).read().decode().strip()
+    except Exception:
+        return "UNKNOWN"
 
+SERVER_COUNTRY = get_country()
 
-HF_URLS = [
-    "https://srffewarf-streamtest.hf.space"
-]
+HTML = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ImgBB Upload</title>
+</head>
+<body>
+  <h3>ImgBB Anonymous Upload (Python)</h3>
+  <p><b>Server Region:</b> {SERVER_COUNTRY}</p>
+  <hr>
+  <input type="file" id="f">
+  <button onclick="up()">Upload</button>
+  <pre id="o"></pre>
+  <script>
+    async function up() {{
+      const f = document.getElementById('f').files[0];
+      if (!f) return alert('Pick file');
+      const fd = new FormData();
+      fd.append('image', f);
+      const r = await fetch('/upload', {{ method: 'POST', body: fd }});
+      const j = await r.json();
+      document.getElementById('o').textContent =
+        JSON.stringify(j, null, 2);
+    }}
+  </script>
+</body>
+</html>
+"""
 
-LOCAL_START_PORT = 19000
+class Handler(http.server.BaseHTTPRequestHandler):
 
-proxy_processes = []
-cloudflared_processes = []
-tunnels_info: dict = {}
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(HTML.encode())
 
-PROXY_PY = os.path.join(os.path.dirname(__file__), "proxy.py")
+    def do_POST(self):
+        if self.path != "/upload":
+            self.send_error(404)
+            return
 
+        content_type = self.headers.get("Content-Type", "")
+        if "boundary=" not in content_type:
+            self.send_error(400)
+            return
 
-def wait_for_port(port: int, timeout: float = 20.0) -> bool:
-    """Wait until a TCP port is accepting connections, up to timeout seconds."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+        boundary = content_type.split("boundary=")[1].encode()
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+
+        image_bytes = None
+        parts = body.split(b"--" + boundary)
+
+        for part in parts:
+            if b"filename=" in part:
+                image_bytes = part.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n", 1)[0]
+                break
+
+        if not image_bytes:
+            self.send_error(400)
+            return
+
+        self.forward_to_imgbb(image_bytes)
+
+    def forward_to_imgbb(self, image_bytes):
+        boundary = "----WebKitFormBoundary" + uuid.uuid4().hex
+
+        body_start = (
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"type\"\r\n\r\n"
+            f"file\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"action\"\r\n\r\n"
+            f"upload\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"source\"; filename=\"x.jpg\"\r\n"
+            f"Content-Type: image/jpeg\r\n\r\n"
+        ).encode()
+
+        body_end = f"\r\n--{boundary}--\r\n".encode()
+
+        conn = http.client.HTTPSConnection("imgbb.com")
+        conn.request(
+            "POST",
+            "/json",
+            body=body_start + image_bytes + body_end,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(body_start) + len(image_bytes) + len(body_end)),
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+        resp = conn.getresponse()
+        raw = resp.read()
+
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1):
-                return True
-        except OSError:
-            time.sleep(0.3)
-    return False
+            imgbb = json.loads(raw.decode())
+        except:
+            self.send_error(500)
+            return
 
-
-def run_proxy(port: int, target_url: str):
-    proc = subprocess.Popen(
-        [sys.executable, PROXY_PY, str(port), target_url],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    proxy_processes.append(proc)
-    return proc
-
-
-def run_cloudflared(port: int, hf_url: str, index: int):
-    proc = subprocess.Popen(
-        ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-    )
-    cloudflared_processes.append(proc)
-
-    url_pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
-
-    def read_output(stream):
-        for line in stream:
-            match = url_pattern.search(line)
-            if match:
-                tunnel_url = match.group(0)
-                tunnels_info[hf_url] = tunnel_url
-                print(f"[{index}] Tunnel ready → {hf_url}: {tunnel_url}", flush=True)
-
-    threading.Thread(target=read_output, args=(proc.stderr,), daemon=True).start()
-    threading.Thread(target=read_output, args=(proc.stdout,), daemon=True).start()
-    return proc
-
-
-def start_all_services():
-    """Start proxy servers, wait for them to be ready, then start cloudflared."""
-    for i, hf_url in enumerate(HF_URLS):
-        port = LOCAL_START_PORT + i
-        run_proxy(port, hf_url)
-
-    # Wait for all proxies to be ready before starting tunnels
-    for i, hf_url in enumerate(HF_URLS):
-        port = LOCAL_START_PORT + i
-        ready = wait_for_port(port, timeout=20.0)
-        if ready:
-            print(f"[{i}] Proxy ready on port {port}, starting tunnel for {hf_url}", flush=True)
+        if imgbb.get("status_code") == 200:
+            image = imgbb.get("image", {})
+            output = {
+                "success": True,
+                "url": image.get("display_url") or image.get("url"),
+                "delete_url": image.get("delete_url"),
+                "width": image.get("display_width"),
+                "height": image.get("display_height"),
+                "size": image.get("size"),
+                "server_country": SERVER_COUNTRY
+            }
         else:
-            print(f"[{i}] WARNING: Proxy on port {port} did not become ready!", flush=True)
-        run_cloudflared(port, hf_url, i)
-        time.sleep(0.3)
+            output = {
+                "success": False,
+                "error": imgbb.get("status_txt", "Upload failed"),
+                "server_country": SERVER_COUNTRY
+            }
 
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(output).encode())
 
-def kill_cloudflared():
-    while cloudflared_processes:
-        p = cloudflared_processes.pop()
-        try:
-            p.terminate()
-            p.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            p.kill()
-        except Exception:
-            pass
-
-
-@app.on_event("startup")
-async def startup_event():
-    threading.Thread(target=start_all_services, daemon=True).start()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    kill_cloudflared()
-    for p in proxy_processes:
-        try:
-            p.terminate()
-            p.wait(timeout=2)
-        except Exception:
-            p.kill()
-
-
-@app.get("/api/instances")
-async def get_instances():
-    return [
-        tunnels_info[hf_url]
-        for hf_url in HF_URLS
-        if tunnels_info.get(hf_url)
-    ]
-
-
-@app.get("/api/new")
-@app.post("/api/new")
-async def new_tunnels():
-    kill_cloudflared()
-    for hf_url in HF_URLS:
-        tunnels_info[hf_url] = None
-
-    def restart():
-        # Give old processes a moment to fully die
-        time.sleep(1)
-        for i, hf_url in enumerate(HF_URLS):
-            port = LOCAL_START_PORT + i
-            # Wait for each proxy port to be up (they should already be running)
-            wait_for_port(port, timeout=5.0)
-            run_cloudflared(port, hf_url, i)
-            time.sleep(0.3)
-
-    threading.Thread(target=restart, daemon=True).start()
-    return {
-        "status": "restarting",
-        "message": "New tunnels are being created. Check /api/instances in ~15 seconds."
-    }
+with socketserver.TCPServer(("", PORT), Handler) as server:
+    print(f"🌍 Server region: {SERVER_COUNTRY}")
+    print(f"Running → http://localhost:{PORT}")
+    server.serve_forever()
